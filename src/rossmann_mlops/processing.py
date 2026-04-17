@@ -22,14 +22,17 @@ def handle_outliers(df):
 def preprocess_data(train, test):
     for df in [train, test]:
         df['Date'] = pd.to_datetime(df['Date'])
-        df['CompetitionDistance'] = df['CompetitionDistance'].fillna(0)
-    train['StateHoliday'] = train['StateHoliday'].map(
-        lambda x: str(x) if pd.notnull(x) else x
-    )
+        df['CompetitionDistance'] = df['CompetitionDistance'].fillna(0) if 'CompetitionDistance' in df.columns else 0
+    if 'StateHoliday' in train.columns:
+        train['StateHoliday'] = train['StateHoliday'].map(
+            lambda x: str(x) if pd.notnull(x) else x
+        )
 
     # log feature
-    train['CompetitionDistance_log'] = np.log1p(train['CompetitionDistance'])
-    test['CompetitionDistance_log'] = np.log1p(test['CompetitionDistance'])
+    if 'CompetitionDistance' in train.columns:
+        train['CompetitionDistance_log'] = np.log1p(train['CompetitionDistance'])
+    if 'CompetitionDistance' in test.columns:
+        test['CompetitionDistance_log'] = np.log1p(test['CompetitionDistance'])
 
     cols_fill_zero = [
         'Promo2SinceWeek', 'Promo2SinceYear',
@@ -37,12 +40,21 @@ def preprocess_data(train, test):
     ]
 
     for df in [train, test]:
-        df[cols_fill_zero] = df[cols_fill_zero].fillna(0)
-        df['PromoInterval'] = df['PromoInterval'].fillna('None')
+        for col in cols_fill_zero:
+            if col in df.columns:
+                df[col] = df[col].fillna(0)
+            else:
+                df[col] = 0
+        if 'PromoInterval' in df.columns:
+            df['PromoInterval'] = df['PromoInterval'].fillna('None')
+        else:
+            df['PromoInterval'] = 'None'
 
     # filter + target log
-    train = train[(train['Open'] != 0) & (train['Sales'] > 0)]
-    train = handle_outliers(train)
+    if 'Open' in train.columns and 'Sales' in train.columns:
+        train = train[(train['Open'] != 0) & (train['Sales'] > 0)]
+    if 'Sales' in train.columns:
+        train = handle_outliers(train)
 
     return train, test
 

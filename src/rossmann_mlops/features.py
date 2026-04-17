@@ -3,8 +3,8 @@ import numpy as np
 
 # ===== COLUMN DEFINITIONS =====
 CATEGORICAL_COLUMNS = ['StoreType', 'Assortment', 'StateHoliday', 'Promo', 'SchoolHoliday', 'Promo2', 'Is_Promo2_Month']
-NUMERIC_COLUMNS = ['Store', 'DayOfWeek', 'Month', 'Day', 'Year', 'WeekOfYear', 
-                   'CompetitionDistance', 'Promo2Open_Month', 'CompetitionOpen_Month']
+NUMERIC_COLUMNS = ['Store', 'DayOfWeek', 'Month', 'Day', 'Year', 'WeekOfYear',
+                   'CompetitionDistance_log', 'Promo2Open_Month', 'CompetitionOpen_Month']
 
 
 # ===== ROW-LEVEL FEATURE =====
@@ -82,7 +82,22 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     df['Date'] = pd.to_datetime(df['Date'])
-    return run_feature_engineering(df, df)[0] if isinstance(run_feature_engineering(df, df), tuple) else df
+    # Fill NaN values from store.csv merge
+    df['CompetitionDistance'] = df['CompetitionDistance'].fillna(0)
+    # Add missing store columns with defaults if not present (e.g. during monitoring)
+    for col in ['Promo2SinceWeek', 'Promo2SinceYear', 'CompetitionOpenSinceMonth', 'CompetitionOpenSinceYear']:
+        if col not in df.columns:
+            df[col] = 0
+        else:
+            df[col] = df[col].fillna(0)
+    if 'PromoInterval' not in df.columns:
+        df['PromoInterval'] = 'None'
+    else:
+        df['PromoInterval'] = df['PromoInterval'].fillna('None')
+    # Log-transform competition distance to match training features
+    df['CompetitionDistance_log'] = np.log1p(df['CompetitionDistance'])
+    result = run_feature_engineering(df, df)
+    return result[0] if isinstance(result, tuple) else result
 
 
 def run_feature_engineering(train_merged, test_merged):

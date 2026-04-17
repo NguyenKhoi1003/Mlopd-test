@@ -1,19 +1,23 @@
 import argparse
-import pandas as pd
-import numpy as np
-import joblib
-import mlflow
-import mlflow.sklearn
-import xgboost as xgb
-import lightgbm as lgb
-from catboost import CatBoostRegressor
-from sklearn.linear_model import LinearRegression
-import yaml
-import logging
+import json
 import os
 import platform
+
+import joblib
+import lightgbm as lgb
+import mlflow
+import mlflow.sklearn
+import numpy as np
+import pandas as pd
 import sklearn
+import xgboost as xgb
+import yaml
+from catboost import CatBoostRegressor
 from mlflow.tracking import MlflowClient
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+import logging
 
 # -----------------------------
 # 1. Cấu hình Logging & Metrics
@@ -44,87 +48,108 @@ def get_model_instance(name, params):
 # -----------------------------
 def train_pipeline(config):
     """
-    Main training pipeline function that accepts config dict
+    Main training pipeline function that accepts config dict.
+    Handles both raw data (with store merge + feature engineering)
+    and pre-processed data (Sales_log already present).
     """
+    from src.rossmann_mlops.features import run_feature_engineering
+    from src.rossmann_mlops.processing import merge_data, preprocess_data
+
     # Extract config values with defaults
     training_cfg = config.get('training', {})
     paths_cfg = config.get('paths', {})
-    
+
     model_name = 'XGBoost'
     model_params = {
         'n_estimators': training_cfg.get('n_estimators', 300),
         'random_state': training_cfg.get('random_state', 42),
     }
-    
-    train_data_path = paths_cfg.get('train_data', 'data/train.csv')
-    store_data_path = paths_cfg.get('store_data', 'data/store.csv')
-    model_save_path = paths_cfg.get('model_file', 'artifacts/models/rossmann_model.joblib')
-    models_dir = os.path.dirname(model_save_path)
 
-    # Setup MLflow
-    mlflow_uri = os.environ.get('MLFLOW_TRACKING_URI', 'http://127.0.0.1:5000')
-    if mlflow_uri:
-        mlflow.set_tracking_uri(mlflow_uri)
-        mlflow.set_experiment("Rossmann_Final_Training")
+    train_data_path = paths_cfg.get('train_data', 'data/processed/train_final.csv')
+    store_data_path = paths_cfg.get('store_data', 'data/raw/store.csv')
+    model_save_path = paths_cfg.get('model_file', 'artifacts/models/rossmann_model.joblib')
+    metrics_save_path = paths_cfg.get('metrics_file', 'artifacts/metrics/metrics.json')
+
+    # Setup MLflow — use local file tracking by default (no server required)
+    mlflow_uri = os.environ.get('MLFLOW_TRACKING_URI', '')
+    mlflow.set_tracking_uri(mlflow_uri if mlflow_uri else 'mlruns')
+    mlflow.set_experiment("Rossmann_Sales_Pipeline")
 
     # Load data
     logger.info(f"Đang tải dữ liệu từ: {train_data_path}")
     try:
-        df = pd.read_csv(train_data_path)
-    except FileNotFoundError:
-        logger.error(f"File not found: {train_data_path}")
-        return {'status': 'error', 'message': f'File not found: {train_data_path}'}
-    
-    # Time-based split (assuming columns exist)
-    if 'Year' in df.columns and 'WeekOfYear' in df.columns:
-        val_condition = (df['Year'] == 2015) & (df['WeekOfYear'] >= 26)
+        raw_train = pd.read_csv(train_data_path, dtype={"StateHoliday": str})
+        store_df  = pd.read_csv(store_data_path)
+    except FileNotFoundError as exc:
+        logger.error(str(exc))
+        return {'status': 'error', 'message': str(exc)}
+
+    # If data is already pre-processed (has Sales_log), skip feature engineering
+    if 'Sales_log' in raw_train.columns:
+        train_featured = raw_train.copy()
     else:
-        # Fallback to simple split if columns don't exist
-        val_condition = df.index >= int(len(df) * 0.8)
-    
-    train_df = df[~val_condition].copy()
-    val_df = df[val_condition].copy()
+        # Merge store data, preprocess, build features
+        train_merged, _ = merge_data(raw_train, raw_train.head(0), store_df)
+        train_processed, _ = preprocess_data(train_merged, train_merged.head(0))
+        train_featured, _ = run_feature_engineering(train_processed, train_processed.head(0))
 
-    # Tách feature/target
+    # Time-based split
+    if 'Year' in train_featured.columns and 'WeekOfYear' in train_featured.columns:
+        val_condition = (train_featured['Year'] == 2015) & (train_featured['WeekOfYear'] >= 26)
+    else:
+        val_condition = train_featured.index >= int(len(train_featured) * 0.8)
+
+    train_df = train_featured[~val_condition].copy()
+    val_df   = train_featured[val_condition].copy()
+
     drop_cols = ['Sales', 'Sales_log', 'Customers']
-    X_train = train_df.drop(columns=[c for c in drop_cols if c in train_df.columns], errors='ignore')
-    y_train = train_df['Sales'] if 'Sales' in train_df.columns else train_df.iloc[:, -1]
-    
-    X_val = val_df.drop(columns=[c for c in drop_cols if c in val_df.columns], errors='ignore')
-    y_val_orig = val_df['Sales'] if 'Sales' in val_df.columns else val_df.iloc[:, -1]
+    X_train = train_df.drop(columns=[c for c in drop_cols if c in train_df.columns])
+    y_train = train_df['Sales_log'] if 'Sales_log' in train_df.columns else train_df['Sales']
+    X_val   = val_df.drop(columns=[c for c in drop_cols if c in val_df.columns])
+    y_val   = val_df['Sales_log'] if 'Sales_log' in val_df.columns else val_df.get('Sales', pd.Series(dtype=float))
 
-    # Get model
     model = get_model_instance(model_name, model_params)
 
-    # Training with MLflow
     try:
-        with mlflow.start_run(run_name="final_production_training"):
+        with mlflow.start_run(run_name="pipeline_training"):
             logger.info(f"🚀 Đang huấn luyện: {model_name}")
             model.fit(X_train, y_train)
-            
-            # Predict & Calculate RMSPE
-            y_pred = model.predict(X_val)
-            val_rmspe = float(rmspe(y_val_orig, y_pred)) if len(y_val_orig) > 0 else 0.0
 
-            # Log metrics
+            if len(X_val) > 0 and len(y_val) > 0:
+                y_pred     = model.predict(X_val)
+                log_scale  = 'Sales_log' in train_featured.columns
+                y_true_s   = np.expm1(y_val.values)  if log_scale else y_val.values
+                y_pred_s   = np.expm1(y_pred)         if log_scale else y_pred
+                rmse_val   = float(np.sqrt(mean_squared_error(y_true_s, y_pred_s)))
+                mae_val    = float(mean_absolute_error(y_true_s, y_pred_s))
+                r2_val     = float(r2_score(y_true_s, y_pred_s))
+                rmspe_val  = float(rmspe(y_true_s, y_pred_s))
+            else:
+                rmse_val = mae_val = r2_val = rmspe_val = 0.0
+
+            metrics = {'rmse': rmse_val, 'mae': mae_val, 'r2': r2_val, 'rmspe': rmspe_val}
+
             mlflow.log_params(model_params)
-            mlflow.log_metric('val_rmspe', val_rmspe)
+            mlflow.log_metrics(metrics)
 
-            # Save model locally
-            os.makedirs(models_dir, exist_ok=True)
+            # Save model
+            os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
             joblib.dump(model, model_save_path)
-            
-            result = {
+
+            # Save metrics file
+            os.makedirs(os.path.dirname(metrics_save_path), exist_ok=True)
+            with open(metrics_save_path, 'w', encoding='utf-8') as f:
+                json.dump(metrics, f, indent=2)
+
+            logger.info(f"✅ RMSE: {rmse_val:.2f} | MAE: {mae_val:.2f} | R2: {r2_val:.4f}")
+            return {
                 'status': 'success',
                 'model_path': model_save_path,
-                'val_rmspe': val_rmspe,
-                'message': f"Model trained and saved: {model_save_path}"
+                'metrics_path': metrics_save_path,
+                'metrics': metrics,
             }
-            
-            logger.info(f"✅ Hoàn tất! RMSPE: {val_rmspe:.4f}")
-            return result
     except Exception as e:
-        logger.error(f"Training failed: {str(e)}")
+        logger.error(f"Training failed: {e}")
         return {'status': 'error', 'message': str(e)}
 
 # -----------------------------

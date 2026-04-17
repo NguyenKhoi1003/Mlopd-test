@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from src.rossmann_mlops.config import resolve_path
@@ -42,4 +43,5 @@ class Predictor:
         merged = merge_store_data(frame, self.store_df)
         features = build_features(merged)
         predictions = self.model.predict(features)
-        return [float(value) for value in predictions]
+        # Model was trained on log1p(Sales); inverse-transform to original scale
+        return [float(np.expm1(value)) for value in predictions]
