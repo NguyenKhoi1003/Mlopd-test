@@ -174,7 +174,7 @@ def call_predict(records: list[dict]) -> list[float] | None:
 
 def rossmann_chart_theme() -> dict:
     tc   = "#F1F5F9"
-    grid = "#334155" if dark else "#E5E7EB"
+    grid = "#334155"
     axis_style = dict(
         color=tc,
         tickfont=dict(color=tc, size=12),
